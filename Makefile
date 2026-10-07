@@ -8,7 +8,7 @@ run:
 
 # Engine + API checks on synthetic media (generates tests/assets on first run).
 test:
-	$(PYTHON) tests/smoke.py && CADENCE_DATA=$$(mktemp -d) $(PYTHON) tests/api_smoke.py && $(PYTHON) tests/resize_check.py && $(PYTHON) tests/dates_check.py && $(PYTHON) tests/norepeat_check.py
+	$(PYTHON) tests/smoke.py && CADENCE_DATA=$$(mktemp -d) $(PYTHON) tests/api_smoke.py && $(PYTHON) tests/resize_check.py && $(PYTHON) tests/dates_check.py && $(PYTHON) tests/norepeat_check.py && $(PYTHON) tests/resync_check.py
 
 install:
 	sudo cp systemd/cadence.service /etc/systemd/system/cadence.service

@@ -280,6 +280,24 @@ def balance(pid):
     return jsonify(shots=cutter.balance(shots, _media_map(p), p["timeline"]))
 
 
+@app.post("/api/projects/<pid>/resync")
+def resync(pid):
+    """After choosing a different part of the song: same clips, same edits, cuts re-timed onto the new beats."""
+    p = project_or_404(pid)
+    if not p["shots"]:
+        abort(400, "nothing to resync")
+    out = P.resync(pid)
+    threading.Thread(target=prewarm_frames, args=(pid,), daemon=True).start()
+    return jsonify(view(out))
+
+
+@app.post("/api/projects/<pid>/restore")
+def restore(pid):
+    project_or_404(pid)
+    b = request.get_json(force=True)
+    return jsonify(view(P.restore(pid, b["ratio"], b["settings"], b.get("starts", {}), b["shots"])))
+
+
 @app.post("/api/projects/<pid>/pick")
 def pick(pid):
     p = project_or_404(pid)

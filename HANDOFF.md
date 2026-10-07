@@ -32,6 +32,11 @@ project on demand.
   appears on tap. Phone landscape puts the preview left and controls right (CSS grid in app.css).
 - Repeat is off by default (every clip once; spare time stretches shots, or the video ends early with a note).
 
+## Song section
+The Music panel has an inline picker per song (when the chosen length is shorter than the song). Moving the section calls `/songs/<id>/start`, then
+`/resync`: same clips, order and per-shot edits, cuts re-timed onto the new beats (`cutter.resync`). Undo restores the section via `/restore`.
+Length changes and Pace/Shuffle still re-cut from scratch.
+
 ## Timeline gestures
 Pinch / ctrl+wheel / ± buttons zoom the timeline (28-260 px per second). Long-press (~0.4s) a shot and drag to reorder: the slots
 (lengths and beat positions) stay, the clips move between them, then `/balance` re-applies the duration rules. Timeline thumbs are

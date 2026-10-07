@@ -121,8 +121,8 @@ def apply_length(p: dict, cap: float | None = None) -> None:
             s["trim"] = [0.0, a["duration"]]
         elif s.get("start") is not None:
             s["trim"] = list(audio.window_at(a, s["start"], take))
-        else:
-            s["trim"] = list(audio.best_window(a, take))
+        else:  # best stretch, then sized exactly like a hand-placed window so moving it later never changes the length
+            s["trim"] = list(audio.window_at(a, audio.best_window(a, take)[0], take))
         remaining -= (s["trim"][1] - s["trim"][0])
 
 
@@ -264,3 +264,41 @@ def refresh_dates(pid: str) -> dict[str, float | None]:
             m["taken"] = found.get(m["id"])
     update(pid, apply)
     return found
+
+
+def resync(pid: str) -> dict:
+    """Keep the edit, move its cuts onto the beats of the currently selected part of the song."""
+    p = load(pid)
+    songs = [x for x in p["songs"] if x["status"] == "ready" and x["trim"][1] - x["trim"][0] >= 0.5]
+    tl = cutter.build_timeline(songs)
+    media = {m["id"]: m for m in p["media"]}
+    st = p["settings"]
+    shots, work = cutter.resync(p["shots"], media, tl, st["pace"], st["seed"])
+    def apply(q):
+        q["shots"], q["timeline"] = shots, work
+    update(pid, apply)
+    ensure_audio(pid)
+    return load(pid)
+
+
+def restore(pid: str, ratio: str, settings: dict, starts: dict, shots: list[dict]) -> dict:
+    """Undo support for edits that also change the soundtrack (length, chosen section, re-cut): put the song section,
+    settings and shots back exactly as they were."""
+    def apply(q):
+        q["ratio"] = ratio
+        for k in ("pace", "style", "filter", "order", "seed", "volume", "length", "repeat"):
+            if k in settings:
+                q["settings"][k] = settings[k]
+        for sg in q["songs"]:
+            if sg["id"] in starts:
+                sg["start"] = starts[sg["id"]]
+        apply_length(q)
+    update(pid, apply)
+    p = load(pid)
+    songs = [x for x in p["songs"] if x["status"] == "ready" and x["trim"][1] - x["trim"][0] >= 0.5]
+    tl = cutter.build_timeline(songs)
+    def put(q):
+        q["shots"], q["timeline"] = cutter.retime(shots), tl
+    update(pid, put)
+    ensure_audio(pid)
+    return load(pid)

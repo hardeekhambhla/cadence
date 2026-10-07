@@ -509,3 +509,56 @@ def balance(shots: list[dict], media: dict[str, dict], tl: dict) -> list[dict]:
         if not moved:
             break
     return cur
+
+
+def _apply_cuts(shots: list[dict], keep: list[int], cuts: list[float], media: dict[str, dict], work: dict) -> list[dict]:
+    down = {t for t, d in zip(work["beats"], work["down"]) if d}
+    drops = {work["beats"][i] for i in work["drops"] if i < len(work["beats"])}
+    out = []
+    for slot, idx in enumerate(keep):
+        s = dict(shots[idx])
+        s["start"], s["dur"] = round(cuts[slot], 3), round(cuts[slot + 1] - cuts[slot], 3)
+        s["punch"] = 0.0 if slot == 0 else (1.2 if s["start"] in drops else (1.0 if s["start"] in down else 0.6))
+        _fix_window(s, media[s["media"]])
+        out.append(s)
+    return out
+
+
+def _snap_cuts(shots: list[dict], tl: dict) -> list[float] | None:
+    """Move each existing cut to the nearest beat of the new grid, keeping the order and the edit's own rhythm (including any
+    shots the user made longer or shorter). None if the new grid can't hold every cut."""
+    n, T, D = len(shots), tl["beats"], tl["duration"]
+    old_D = shots[-1]["start"] + shots[-1]["dur"]
+    scale = D / old_D if old_D else 1.0
+    cuts, prev_t, prev_k = [0.0], 0.0, -1
+    for s in shots[1:]:
+        k = max(_nearest(T, s["start"] * scale), prev_k + 1)
+        while k < len(T) and T[k] - prev_t < MIN_SHOT:
+            k += 1
+        if k >= len(T) or T[k] > D - MIN_SHOT:
+            return None
+        cuts.append(T[k]); prev_t, prev_k = T[k], k
+    return cuts + [D]
+
+
+def resync(shots: list[dict], media: dict[str, dict], tl: dict, pace: float, seed: int) -> tuple[list[dict], dict]:
+    """Re-time an existing edit onto a new beat grid (e.g. after picking a different part of the song). The clips, their
+    order and every per-shot edit (window, fit, focus, Ken Burns, custom lengths) are kept; the cuts move onto the new beats.
+    If the new section is very different (or joins several songs) the cuts are re-planned instead, still keeping clips + order."""
+    n = len(shots)
+    old_D = shots[-1]["start"] + shots[-1]["dur"] if shots else 0
+    cuts = None
+    if n >= 2 and not tl.get("bounds") and old_D and abs(tl["duration"] / old_D - 1) <= 0.25:
+        cuts = _snap_cuts(shots, tl)
+    if cuts is not None:
+        return _apply_cuts(shots, list(range(n)), cuts, media, tl), tl
+    seq = [media[s["media"]] for s in shots]
+    cuts, work = plan_cuts(tl, pace, seed, n)
+    if len(cuts) - 1 > n:
+        cuts = merge_to_fit(cuts, seq, work, pace)
+    keep = list(range(n))
+    if len(cuts) - 1 < n:  # grid too sparse for every shot: keep an even spread, in order
+        m = len(cuts) - 1
+        keep = sorted({round(i * (n - 1) / max(m - 1, 1)) for i in range(m)})[:m]
+        cuts = cuts[: len(keep) + 1]
+    return balance(_apply_cuts(shots, keep, cuts, media, work), media, work), work

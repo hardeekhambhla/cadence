@@ -6,7 +6,7 @@ import { h, icon, fmt } from './ui.js';
 let current = null;
 export const stopPreview = () => { if (current) current.stop(); };
 
-export function songPicker({ pid, song, onChange }) {
+export function songPicker({ pid, song, onChange, onPlay }) {
   const a = song.analysis;
   let [t0, t1] = song.trim;
   const len = t1 - t0;
@@ -114,8 +114,9 @@ export function songPicker({ pid, song, onChange }) {
   }
   // arrows step exactly one second (to the nearest beat so the cut still lands on the music)
   function move(dir) {
-    let target = clampStart(nearestBeat(t0 + dir));
-    if (Math.abs(target - t0) < 0.01) target = clampStart(nearestBeat(t0 + dir * 1.3));
+    const base = draggable ? startFromScroll() : t0;   // from where the strip is now, so quick repeated taps accumulate
+    let target = clampStart(nearestBeat(base + dir));
+    if (Math.abs(target - base) < 0.01) target = clampStart(nearestBeat(base + dir * 1.3));
     scroller.scrollTo({ left: target * pps, behavior: 'smooth' });
   }
 
@@ -146,6 +147,7 @@ export function songPicker({ pid, song, onChange }) {
   }
   async function play() {
     stopPreview();
+    if (onPlay) onPlay();
     ensureAudio().currentTime = t0;
     try { await audio.play(); } catch (e) { return; }
     playing = true; current = api;

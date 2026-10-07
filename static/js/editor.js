@@ -68,16 +68,27 @@ export async function editor(screen, pid, go) {
     const need = s.dur * s.speed;
     s.in = +Math.max(0, Math.min(s.in, m.duration - need)).toFixed(3);
   }
-  function snapshot() {
-    hist.push(JSON.stringify({ shots: p.shots, ratio: p.ratio, settings: p.settings }));
+  const snapshotJSON = () => JSON.stringify({ shots: p.shots, ratio: p.ratio, settings: p.settings, starts: Object.fromEntries(p.songs.map((s) => [s.id, s.start ?? null])) });
+  function snapshot(json) {
+    hist.push(json || snapshotJSON());
     if (hist.length > 40) hist.shift();
     undoBtn.disabled = false;
   }
   async function undo() {
     if (!hist.length) return;
-    Object.assign(p, JSON.parse(hist.pop()));
+    const prev = JSON.parse(hist.pop());
     undoBtn.disabled = !hist.length;
-    sel = -1; refresh(true);
+    sel = -1;
+    const soundtrackChanged = String(prev.settings.length) !== String(p.settings.length) || p.songs.some((s) => (s.start ?? null) !== (prev.starts[s.id] ?? null));
+    if (soundtrackChanged) {  // the song section / length changed too: the server puts the soundtrack back with the shots
+      try {
+        const r = await work(() => api.restore(pid, { ratio: prev.ratio, settings: prev.settings, starts: prev.starts, shots: prev.shots }));
+        Object.assign(p, { shots: r.shots, timeline: r.timeline, songs: r.songs, settings: r.settings, ratio: r.ratio, audio_v: r.audio_v });
+        player.t = 0; refresh(false); return;
+      } catch (err) { toast('Could not undo'); return; }
+    }
+    Object.assign(p, { shots: prev.shots, ratio: prev.ratio, settings: prev.settings });
+    refresh(true);
   }
   function persist() {
     clearTimeout(saveT);
@@ -133,6 +144,7 @@ export async function editor(screen, pid, go) {
     if (i !== lastIdx) { lastIdx = i; markPlaying(i); }
   });
   player.onState(applyStageUI);
+  player.onState((playing) => { if (playing) stopPreview(); }); // never two soundtracks at once
   let lastIdx = -1;
 
   // ------------------------------------------------------------------ timeline
@@ -395,6 +407,23 @@ export async function editor(screen, pid, go) {
     hintEl.textContent = p.note || 'Tap a shot to edit it · drag the timeline to scrub';
     player.t = 0; refresh(false); toastUndo('Re-cut', undo); return sp;
   };
+  let resyncT = 0;
+  let pendingSnap = null; // taken *before* the picker changes the song section, so Undo can put the section back
+  let resyncing = false, resyncAgain = false;
+  const scheduleResync = () => { clearTimeout(resyncT); resyncT = setTimeout(resyncNow, 450); };
+  async function resyncNow() {  // same clips and edits, cuts re-timed onto the beats of the newly chosen section
+    if (resyncing) { resyncAgain = true; return; }       // one at a time; a newer pick re-runs it afterwards
+    resyncing = true;
+    if (pendingSnap) { snapshot(pendingSnap); pendingSnap = null; }
+    try {
+      await flush();                                     // the server resyncs what it has saved, so save pending edits first
+      const out = await work(() => api.resync(pid));
+      Object.assign(p, { shots: out.shots, timeline: out.timeline, songs: out.songs, audio_v: out.audio_v });
+      sel = -1; player.t = 0; refresh(false);
+      if (!resyncAgain) toastUndo('Resynced to the new section', undo);
+    } catch (err) { toast('Could not resync'); }
+    finally { resyncing = false; if (resyncAgain) { resyncAgain = false; scheduleResync(); } }
+  }
   const panels = {
     pace() {
       const s = slider({ min: 0, max: 1, step: 0.05, value: p.settings.pace, onchange: (v) => { p.settings.pace = v; busyRecut({ pace: v }); } });
@@ -423,8 +452,12 @@ export async function editor(screen, pid, go) {
         wait();
       } });
       return h('div', { class: 'panel' }, head('Music', h('button', { class: 'btn small secondary', onclick: () => input.click() }, icon('plus', 18), 'Add song')),
-        ready.map((s) => h('div', { class: 'row-inline', style: { marginBottom: '8px', color: 'var(--ink-2)', fontSize: '14px' } }, icon('music', 18), h('span', { style: { flex: 1, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.name),
-          s.trim[1] - s.trim[0] < s.analysis.duration - 1 ? h('button', { class: 'btn small secondary', onclick: () => choosePart(s) }, 'Choose part') : `${Math.round(s.analysis.bpm)} BPM`)),
+        ready.map((s) => (s.trim[1] - s.trim[0] < s.analysis.duration - 1
+          ? h('div', { style: { marginBottom: '12px' } },
+              h('div', { class: 'row-inline', style: { marginBottom: '8px', fontSize: '14px', color: 'var(--ink-2)' } }, icon('music', 18), h('span', { style: { flex: 1, color: 'var(--ink)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.name), `${Math.round(s.analysis.bpm)} BPM`),
+              songPicker({ pid, song: s, onPlay: () => player.pause(), onChange: (proj) => { if (!pendingSnap && !resyncing) pendingSnap = snapshotJSON(); p.songs = proj.songs; scheduleResync(); } }))
+          : h('div', { class: 'row-inline', style: { marginBottom: '8px', color: 'var(--ink-2)', fontSize: '14px' } }, icon('music', 18), h('span', { style: { flex: 1, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.name), `${Math.round(s.analysis.bpm)} BPM`))),
+        ready.every((s) => s.trim[1] - s.trim[0] >= s.analysis.duration - 1) && ready.length ? h('div', { class: 'hint', style: { textAlign: 'left', padding: '0 0 8px' } }, 'Pick a length shorter than the song to choose which part plays.') : null,
         h('div', { class: 'group-title', style: { margin: '10px 0 8px' } }, 'Length'),
         h('div', { class: 'lengths', style: { margin: '0 0 12px' } }, lens.map(([v, l]) => h('button', { class: 'lenchip' + (curLen === v ? ' on' : ''), onclick: () => setLength(v) }, l))),
         h('div', { class: 'group-title', style: { margin: '4px 0 0' } }, 'Volume'), vol, input);
@@ -449,13 +482,6 @@ export async function editor(screen, pid, go) {
           h('div', { class: 'tile', style: { backgroundImage: `url(${thumbUrl(pid, m)})`, opacity: counts[m.id] ? 1 : 0.5 } }, h('div', { class: 'badge' }, counts[m.id] ? `×${counts[m.id]}` : 'unused')))), input);
     },
   };
-
-  function choosePart(s) {
-    let changed = false;
-    const picker = songPicker({ pid, song: s, onChange: (proj) => { changed = true; p.songs = proj.songs; } });
-    sheet({ title: 'Choose the part of the song', body: h('div', { class: 'pad', style: { paddingBottom: '14px' } }, picker, h('div', { class: 'hint', style: { marginTop: '12px' } }, 'Drag the window, tap play to hear it. The video re-cuts to the new part when you close this.')),
-      onClose: () => { stopPreview(); if (changed) busyRecut({}).then(() => openPanel('music')); } });
-  }
 
   async function setRatio(r) {
     snapshot(); p.ratio = r;
@@ -531,5 +557,5 @@ export async function editor(screen, pid, go) {
   panelHost.append(hintEl);
   refresh(false);
   requestAnimationFrame(() => { fitStage(); drawTimeline(); player.showAt(0); });
-  return () => { destroyed = true; stopPreview(); flush(); removeEventListener('keydown', onKey); ro.disconnect(); player.destroy(); };
+  return () => { destroyed = true; clearTimeout(resyncT); stopPreview(); flush(); removeEventListener('keydown', onKey); ro.disconnect(); player.destroy(); };
 }
