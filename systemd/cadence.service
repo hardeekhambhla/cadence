@@ -1,0 +1,12 @@
+[Unit]
+Description=Cadence — beat-synced video editor
+After=network.target
+
+[Service]
+User=dhruv
+WorkingDirectory=/home/dhruv/hardee/video-editor
+ExecStart=/home/dhruv/hardee/video-editor/.venv/bin/python app.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
