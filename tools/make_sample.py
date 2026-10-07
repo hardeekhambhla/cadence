@@ -88,6 +88,16 @@ def build() -> None:
     photo(OUT / "08-photo-golden.jpg", 1080, 1440, "#FFB703", "#FB8500", "GOLDEN")
     photo(OUT / "09-photo-wave.jpg", 1440, 1080, "#48CAE4", "#0077B6", "WAVE")
     photo(OUT / "10-photo-bloom.jpg", 1080, 1080, "#FF8FAB", "#C9184A", "BLOOM")
+    # more material so a 36s song is covered without repeating anything
+    extra = [("11-glow", "#FFD60A", "#FF7B00", "#FF0054", "GLOW"), ("12-drive", "#3A86FF", "#8338EC", "#FF006E", "DRIVE"),
+             ("13-flow", "#06D6A0", "#118AB2", "#073B4C", "FLOW"), ("14-spark", "#F15BB5", "#FEE440", "#00BBF9", "SPARK"),
+             ("15-dream", "#9B5DE5", "#F15BB5", "#00F5D4", "DREAM"), ("16-light", "#FFF3B0", "#E09F3E", "#9E2A2B", "LIGHT")]
+    for i, (name, c0, c1, c2, word) in enumerate(extra):
+        grad_clip(OUT / f"{name}.mp4", 720, 1280 if i % 3 else 720, 3 + i % 3, c0, c1, c2, word, speed=0.05 + 0.01 * i)
+    for name, c0, c1, w, h, word in [("17-photo-sky", "#74C0FC", "#4DABF7", 1080, 1440, "SKY"), ("18-photo-sand", "#FFE8CC", "#E8590C", 1440, 1080, "SAND"),
+                                      ("19-photo-leaf", "#B2F2BB", "#2B8A3E", 1080, 1350, "LEAF"), ("20-photo-moon", "#364FC7", "#1B1F3B", 1080, 1080, "MOON"),
+                                      ("21-photo-fire", "#FFA94D", "#C92A2A", 1080, 1440, "FIRE"), ("22-photo-sea", "#3BC9DB", "#1864AB", 1440, 1080, "SEA")]:
+        photo(OUT / f"{name}.jpg", w, h, c0, c1, word)
 
 
 if __name__ == "__main__":
