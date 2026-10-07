@@ -35,7 +35,7 @@ const P = {
   fit: '<rect x="3.5" y="6.5" width="17" height="11" rx="2.5"/><path d="M8 12h8"/>',
   longer: '<path d="M4 12h16M15 7l5 5-5 5"/>',
   shorter: '<path d="M20 12H4M9 7l-5 5 5 5"/>',
-  undo: '<path d="M9 7L4.5 11.5 9 16"/><path d="M5 11.5h8.5a5.5 5.5 0 010 11H11" transform="translate(0 -3)"/>',
+  undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 010 11H11"/>',
   share: '<path d="M12 15V3.5M7.5 8L12 3.5 16.5 8"/><path d="M5 12v6.5a2 2 0 002 2h10a2 2 0 002-2V12"/>',
   download: '<path d="M12 3.5V15M7.5 11L12 15.5 16.5 11"/><path d="M5 19.5h14"/>',
   shuffle: '<path d="M3.5 7h3.5c5 0 5.5 10 10.5 10h3M3.5 17h3.5c1.5 0 2.7-.8 3.7-2M13.5 9c1-1.3 2.2-2 3.5-2h3.5"/><path d="M18 4l2.5 3-2.5 3M18 14l2.5 3-2.5 3"/>',
@@ -59,6 +59,13 @@ export function toast(msg) {
   const t = h('div', { class: 'toast' }, msg);
   document.body.append(t);
   setTimeout(() => t.remove(), 2500);
+}
+
+export function toastUndo(msg, onUndo) {
+  const t = h('div', { class: 'toast action', style: { animationDuration: '5s' } }, msg,
+    h('button', { onclick: () => { t.remove(); onUndo(); } }, 'Undo'));
+  document.body.append(t);
+  setTimeout(() => t.remove(), 5100);
 }
 
 export function sheet({ title, body, onClose }) {

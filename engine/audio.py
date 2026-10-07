@@ -200,12 +200,15 @@ def analyze(path: str) -> dict:
     beats = frames * HOP / SR - LATENCY
     beats = _extend(beats, duration) if len(beats) >= 3 else beats
     beats = beats[(beats >= 0) & (beats < duration)]
+    fallback = len(beats) < 8 and duration > 4
+    if fallback:  # no usable pulse (silence, ambient): cut on an even 100 BPM grid instead of nothing
+        beats = np.arange(0.3, duration - 0.3, 0.6)
     bpm = 60.0 / float(np.median(np.diff(beats))) if len(beats) > 2 else 60 * FPS / period
     frames_for_phase = np.round((beats + LATENCY) * SR / HOP).astype(int)
     phase = _downbeat_phase(frames_for_phase, o, bass)
     down = list(range(phase, len(beats), 4))
     energy = _beat_energy(y, beats, duration) if len(beats) > 1 else np.zeros(len(beats))
-    bins = 400
+    bins = 1000
     chunk = max(1, len(y) // bins)
     peaks = np.abs(y[: chunk * bins]).reshape(bins, chunk).max(1)
     peaks = np.clip(peaks / (np.percentile(peaks, 99.5) + 1e-9), 0, 1)
@@ -216,6 +219,7 @@ def analyze(path: str) -> dict:
         "downbeats": down,
         "energy": [round(float(e), 2) for e in energy],
         "drops": _drops(energy, down),
+        "fallback": fallback,
         "peaks": [round(float(p), 2) for p in peaks],
     }
 
@@ -239,3 +243,17 @@ def best_window(a: dict, length: float) -> tuple[float, float]:
         if score > best_score:
             best, best_score = (t0, end), score
     return best
+
+
+def window_at(a: dict, start: float, length: float) -> tuple[float, float]:
+    """A `length`-second window starting near `start`, both ends snapped to beats and kept inside the song."""
+    dur = a["duration"]
+    start = min(max(0.0, start), max(0.0, dur - length))
+    beats = a["beats"]
+    if not beats:
+        return start, min(dur, start + length)
+    t0 = min(beats, key=lambda t: abs(t - start))
+    t0 = min(t0, max(0.0, dur - length * 0.9))
+    cands = [t for t in beats if t <= dur and t - t0 >= length * 0.9]
+    end = min(cands, key=lambda t: abs(t - (t0 + length))) if cands else min(dur, t0 + length)
+    return t0, end

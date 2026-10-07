@@ -2,6 +2,7 @@ import { api, upload, thumbUrl, RATIOS, ratioAR } from './api.js';
 import { h, icon, dur, seg, sheet, toast, waveform } from './ui.js';
 import { PRESETS, LENGTHS, LOOKS, ENERGY, STYLES } from './looks.js';
 import { FILTER_CSS } from './player.js';
+import { songPicker, stopPreview } from './picker.js';
 
 const STEPS = ['Format', 'Music', 'Clips', 'Style'];
 
@@ -9,6 +10,7 @@ export async function wizard(screen, pid, go) {
   let p = await api.get(pid);
   let step = 0;
   let energy = 'balanced';
+  let selTile = null; // tapped clip tile (shows its remove button)
   p.preset = p.preset || (PRESETS.find((x) => x.ratio === p.ratio && x.length === p.settings.length) || PRESETS[0]).id;
   const uploads = []; // local in-flight uploads {id, name, kind, url, progress, error}
   let timer = null, dead = false;
@@ -58,15 +60,16 @@ export async function wizard(screen, pid, go) {
     const cards = p.songs.map((s) => {
       const a = s.analysis;
       const cv = h('canvas');
+      const long = a && s.trim[1] - s.trim[0] < a.duration - 1;
       const card = h('div', { class: 'song' },
         h('div', { class: 'top' }, icon('music', 20), h('div', { class: 'nm' }, s.name),
-          h('button', { class: 'x', onclick: async () => { p = await api.delSong(pid, s.id); render(); } }, icon('close', 14))),
+          h('button', { class: 'x', 'aria-label': 'Remove song', onclick: async () => { p = await api.delSong(pid, s.id); render(); } }, icon('close', 14))),
         s.status === 'analyzing' ? h('div', { class: 'info', style: { padding: '14px 0' } }, h('div', { class: 'spinner' }), 'Finding the beat…') :
         s.status === 'error' ? h('div', { class: 'info', style: { color: 'var(--danger)' } }, "Couldn't read this file") : [
-          cv,
-          h('div', { class: 'info' }, h('span', { class: 'chip' }, `${Math.round(a.bpm)} BPM`), s.trim[1] - s.trim[0] > 0.5 ? `Using ${dur(s.trim[1] - s.trim[0])} of ${dur(a.duration)}` : 'Not needed for this length'),
+          long ? songPicker({ pid, song: s, onChange: (proj) => { p = proj; } }) : cv,
+          h('div', { class: 'info' }, h('span', { class: 'chip' }, a.fallback ? 'No clear beat · even rhythm' : `${Math.round(a.bpm)} BPM`), s.trim[1] - s.trim[0] > 0.5 ? (long ? 'Drag to choose · ▶ to hear it' : `Using the full ${dur(a.duration)}`) : 'Not needed for this length'),
         ]);
-      if (a) requestAnimationFrame(() => waveform(cv, a.peaks, { beats: a.beats, duration: a.duration, trim: s.trim }));
+      if (a && !long) requestAnimationFrame(() => waveform(cv, a.peaks, { beats: a.beats, duration: a.duration, trim: s.trim }));
       return card;
     });
     const ready = p.songs.filter((s) => s.status === 'ready');
@@ -83,7 +86,7 @@ export async function wizard(screen, pid, go) {
           p.settings.length = v; render();
           p = await api.save(pid, { settings: { length: v } }); render();
         } }, label))),
-        h('div', { class: 'hint', style: { margin: '2px 24px 14px' } }, p.settings.length === 'fit' ? "We'll size it to your clips once you've added them." : `Your video will run about ${dur(used)}, cut from the best part of the song.`)] : null,
+        h('div', { class: 'hint', style: { margin: '2px 24px 14px' } }, p.settings.length === 'fit' ? "We'll size it to your clips once you've added them." : `Your video will run about ${dur(used)}, cut from ${ready.some((s) => s.start != null) ? 'the part you picked' : 'the best part of the song'}.`)] : null,
       p.songs.length ? null : h('div', { class: 'empty', style: { marginTop: '4vh' } }, h('div', { class: 'mark' }, icon('music', 88)),
         h('button', { class: 'btn', style: { width: '200px', margin: '0 auto' }, onclick: () => input.click() }, icon('plus', 20), 'Add a song')),
       input);
@@ -108,7 +111,7 @@ export async function wizard(screen, pid, go) {
     let active = 0;
     function addFiles(files) {
       files.forEach((f) => {
-        const u = { id: Math.random().toString(36).slice(2), name: f.name, kind: f.type.startsWith('image/') ? 'image' : 'video', url: f.type.startsWith('image/') ? URL.createObjectURL(f) : null, progress: 0 };
+        const u = { file: f, id: Math.random().toString(36).slice(2), name: f.name, kind: f.type.startsWith('image/') ? 'image' : 'video', url: f.type.startsWith('image/') ? URL.createObjectURL(f) : null, progress: 0 };
         uploads.push(u); queue.push([f, u]);
       });
       render(); pump();
@@ -121,25 +124,30 @@ export async function wizard(screen, pid, go) {
           .finally(async () => { active--; p = await api.get(pid); render(); pump(); poke(); });
       }
     }
+    const taken = (m) => m.taken || m.modified || 0;
+    const shown = p.settings.order === 'chrono' ? [...p.media].sort((x, y) => taken(x) - taken(y) || x.name.localeCompare(y.name)) : p.media;
+    const day = (m) => (m.taken ? new Date(m.taken * 1000).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }) : null);
     const tiles = [
-      ...p.media.map((m) => h('div', { class: 'tile', style: m.thumb ? { backgroundImage: `url(${thumbUrl(pid, m)})` } : {} },
+      ...shown.map((m) => h('div', { class: 'tile' + (selTile === m.id ? ' sel' : ''), style: m.thumb ? { backgroundImage: `url(${thumbUrl(pid, m)})` } : {}, onclick: () => { selTile = selTile === m.id ? null : m.id; render(); } },
         m.status === 'processing' ? h('div', { class: 'veil' }, h('div', { class: 'spinner' })) : null,
         m.status === 'error' ? h('div', { class: 'veil', style: { color: '#fff', fontSize: '12px' } }, 'Unsupported') : null,
-        m.kind === 'video' && m.duration ? h('div', { class: 'badge' }, dur(m.duration)) : null,
-        h('button', { class: 'x', onclick: async () => { p = await api.delMedia(pid, m.id); render(); } }, icon('close', 12)))),
-      ...uploads.map((u) => h('div', { class: 'tile', id: 'u' + u.id, style: u.url ? { backgroundImage: `url(${u.url})` } : {} },
-        h('div', { class: 'veil' }, u.error ? h('span', { style: { color: '#fff', fontSize: '12px' } }, 'Failed') : h('div', { class: 'spinner' })),
+        day(m) ? h('div', { class: 'date' }, day(m)) : null,
+        m.kind === 'video' && m.duration ? h('div', { class: 'badge dur' }, dur(m.duration)) : null,
+        h('button', { class: 'x', 'aria-label': 'Remove clip', onclick: async (e) => { e.stopPropagation(); selTile = null; p = await api.delMedia(pid, m.id); render(); } }, icon('close', 14)))),
+      ...uploads.map((u) => h('div', { class: 'tile' + (u.error ? ' failed' : ''), id: 'u' + u.id, style: u.url ? { backgroundImage: `url(${u.url})` } : {},
+        onclick: u.error ? () => { u.error = null; u.progress = 0; queue.push([u.file, u]); render(); pump(); } : null },
+        h('div', { class: 'veil' }, u.error ? h('span', { style: { color: '#fff', fontSize: '12px', textAlign: 'center', padding: '0 6px' } }, 'Failed · tap to retry') : h('div', { class: 'spinner' })),
         h('div', { class: 'tprog', style: { width: u.progress * 100 + '%' } }))),
     ];
     const n = p.media.length + uploads.length;
     put(body, 
       h('div', { class: 'large-title' }, 'Clips'),
-      h('div', { class: 'sub' }, n ? `${n} ${n === 1 ? 'item' : 'items'}. Cadence uses every one.` : 'Add the videos and photos for this edit.'),
+      h('div', { class: 'sub' }, n ? `${uploads.some((u) => !u.error) ? `Uploading ${uploads.filter((u) => !u.error).length} more… ` : ''}${n} ${n === 1 ? 'item' : 'items'}. Cadence uses every one, once.` : 'Add the videos and photos for this edit.'),
       mismatch(),
       n ? h('div', { class: 'grid' }, tiles) : h('div', { class: 'empty', style: { marginTop: '4vh' } }, h('div', { class: 'mark' }, icon('media', 88)),
         h('button', { class: 'btn', style: { width: '240px', margin: '0 auto' }, onclick: () => input.click() }, icon('plus', 20), 'Add photos & videos')),
       n ? h('div', { class: 'group-title' }, 'Order') : null,
-      n ? h('div', { style: { margin: '0 16px 16px' } }, seg([['chrono', 'By date'], ['added', 'As added'], ['shuffle', 'Shuffle']], p.settings.order, (v) => { p.settings.order = v; })) : null,
+      n ? h('div', { style: { margin: '0 16px 16px' } }, seg([['chrono', 'By date'], ['added', 'As added'], ['shuffle', 'Shuffle']], p.settings.order, (v) => { p.settings.order = v; render(); })) : null,
       input);
     put(footer, 
       n ? h('button', { class: 'btn secondary block', style: { marginBottom: '10px' }, onclick: () => input.click() }, icon('plus', 20), 'Add more') : null,
@@ -174,6 +182,7 @@ export async function wizard(screen, pid, go) {
   }
 
   function render() {
+    stopPreview();
     body.replaceChildren(); footer.replaceChildren(); nav.replaceChildren();
     put(nav, h('div', { class: 'l' }, h('button', { class: 'nav-btn', onclick: () => (step ? (step--, render()) : go('#/')) }, step ? [icon('back', 22), 'Back'] : 'Cancel')),
       h('div', { class: 'title' }, STEPS[step]), h('div', { class: 'r' }));
@@ -182,5 +191,5 @@ export async function wizard(screen, pid, go) {
   }
   render();
   if (busy()) refresh();
-  return () => { dead = true; clearTimeout(timer); };
+  return () => { dead = true; clearTimeout(timer); stopPreview(); };
 }

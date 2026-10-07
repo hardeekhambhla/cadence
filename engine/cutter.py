@@ -20,6 +20,8 @@ RATIOS = {
     "1:1": (1080, 1080),
     "16:9": (1920, 1080),
 }
+PHOTO_MIN, PHOTO_PREF, PHOTO_MAX = 0.5, 1.0, 2.0   # photos read best around a second
+VIDEO_MIN, VIDEO_MAX = 1.0, 5.0                      # videos get 1-5s depending on the beat
 MIN_SHOT = 0.32
 EDGE = 0.35  # no cut closer than this to either end
 BLUR_FIT_LOSS = 0.45  # crop loss above which a clip is letterboxed over a blurred copy of itself
@@ -205,23 +207,21 @@ def assign(cuts: list[float], items: list[dict], size: tuple[int, int], tl: dict
         start, end = cuts[i], cuts[i + 1]
         dur = round(end - start, 3)
         chosen, win = None, None
-        for attempt in range(2):
+        for attempt in range(len(items) + 1):
             if not queue:
                 queue.extend(items)
                 for k in used:
                     used[k] = []
-            # look a few clips ahead for one that's long enough, otherwise take the head
-            order = list(queue)[:4]
-            fits = [m for m in order if m["kind"] == "image" or m["duration"] >= dur * 0.9]
-            for m in (fits or order):
-                if m["kind"] == "image":
-                    chosen, win = m, {"in": 0.0, "speed": 1.0}
-                    break
+            # strictly in order (chronological by default): the next clip in line, skipping only exhausted videos
+            m = queue[0]
+            if m["kind"] == "image":
+                chosen, win = m, {"in": 0.0, "speed": 1.0}
+            else:
                 w = pick_window(m, dur, used[m["id"]])
                 if w is not None:
                     chosen, win = m, w
-                    break
-                queue.remove(m)  # exhausted
+                else:
+                    queue.popleft()  # exhausted
             if chosen:
                 break
         if chosen is None:  # everything exhausted twice over — reuse freely
@@ -248,10 +248,127 @@ def assign(cuts: list[float], items: list[dict], size: tuple[int, int], tl: dict
     return shots, unused
 
 
+
+def _caps(m: dict) -> tuple[float, float]:
+    """(comfortable max, stretched max) shot length for a clip. Stretching is only used to fill spare song time
+    instead of repeating clips."""
+    if m["kind"] == "image":
+        return PHOTO_MAX, 3.0
+    dv = max(m["duration"], 1.0)
+    return min(VIDEO_MAX, dv), min(12.0, dv)
+
+
+def _group_cost(m: dict, T: float, pace: float) -> float:
+    """How well a clip suits a slot of length T. Photos like ~1s, videos 1-5s (leaning longer when calm); longer than
+    that is allowed (gently penalised) up to the stretch cap so spare time is absorbed rather than clips repeated."""
+    hi, stretch = _caps(m)
+    if m["kind"] == "image":
+        pref = 1.3 - 0.5 * pace
+        c = abs(T - pref) * 0.9
+        if T > 1.6:
+            c += 1.0 + (T - 1.6) * 6 if T <= hi else 1.0 + (hi - 1.6) * 6 + (T - hi) * 1.5
+        if T > stretch:
+            c += 4 + (T - stretch) * 8
+        if T < PHOTO_MIN:
+            c += 2.0
+        return c
+    pref = 3.0 - 1.7 * pace
+    if T < VIDEO_MIN:
+        return (VIDEO_MIN - T) * 3.0 + 0.5
+    if T > hi:
+        return 0.3 + (T - hi) * 1.2 + (4 + (T - stretch) * 8 if T > stretch else 0)
+    return abs(T - min(pref, hi)) * 0.2
+
+
+def merge_to_fit(cuts: list[float], seq: list[dict], tl: dict, pace: float) -> list[float]:
+    """Merge neighbouring slots until there is exactly one per clip, choosing the merges that best suit each clip's type
+    (dynamic programming over consecutive groups). Prefers ending groups on downbeats and keeping the cut on a drop."""
+    N, K = len(cuts) - 1, len(seq)
+    if N <= K:
+        return cuts
+    down = {t for t, d in zip(tl["beats"], tl["down"]) if d}
+    drops = {tl["beats"][i] for i in tl["drops"] if i < len(tl["beats"])}
+    INF = float("inf")
+    G = 14
+    dp = [[INF] * (N + 1) for _ in range(K + 1)]
+    back = [[0] * (N + 1) for _ in range(K + 1)]
+    dp[0][0] = 0.0
+    for k in range(1, K + 1):
+        m = seq[k - 1]
+        for j in range(k, N - (K - k) + 1):
+            for g in range(1, min(G, j - (k - 1)) + 1):
+                jp = j - g
+                if dp[k - 1][jp] == INF:
+                    continue
+                T = cuts[j] - cuts[jp]
+                c = dp[k - 1][jp] + _group_cost(m, T, pace)
+                if cuts[j] in down:
+                    c -= 0.12
+                if cuts[jp] in drops:
+                    c -= 0.4
+                if c < dp[k][j]:
+                    dp[k][j], back[k][j] = c, jp
+    out, j = [cuts[N]], N
+    for k in range(K, 0, -1):
+        j = back[k][j]
+        out.append(cuts[j])
+    return out[::-1]
+
+
+def assign_seq(cuts: list[float], seq: list[dict], size: tuple[int, int], tl: dict, seed: int) -> list[dict]:
+    """One clip per slot, in the given order. A video seen again gets a different window when one is free."""
+    rng = random.Random(seed + 1)
+    tw, th = size
+    used: dict[str, list[tuple[float, float]]] = {}
+    uses: dict[str, int] = {}
+    down_times = {t for t, d in zip(tl["beats"], tl["down"]) if d}
+    drop_times = {tl["beats"][i] for i in tl["drops"] if i < len(tl["beats"])}
+    shots = []
+    for i, m in enumerate(seq):
+        start, end = cuts[i], cuts[i + 1]
+        dur = round(end - start, 3)
+        if m["kind"] == "image":
+            win = {"in": 0.0, "speed": 1.0}
+        else:
+            win = pick_window(m, dur, used.setdefault(m["id"], [])) or pick_window(m, dur) or {"in": 0.0, "speed": 1.0}
+            used[m["id"]].append((win["in"], win["in"] + dur * win["speed"]))
+        uses[m["id"]] = uses.get(m["id"], 0) + 1
+        shot = {"id": uid(), "media": m["id"], "in": win["in"], "speed": win["speed"], "dur": dur, "start": round(start, 3),
+                "fit": _fit_for(m, tw, th), "fx": None, "fy": None, "punch": 0.0}
+        if i > 0:
+            shot["punch"] = 1.2 if start in drop_times else (1.0 if start in down_times else 0.6)
+        if m["kind"] == "image":
+            z_in = uses[m["id"]] % 2 == 1
+            shot["kb"] = {"z0": 1.0 if z_in else 1.09, "z1": 1.09 if z_in else 1.0, "dx": rng.choice([-1, 1]) * 0.5, "dy": rng.choice([-1, 1]) * 0.35}
+        shots.append(shot)
+    return shots
+
+
+def plan_no_repeat(items: list[dict], tl: dict, ratio: str, pace: float, seed: int) -> tuple[list[dict], list[str], dict, float | None]:
+    """Every clip exactly once, in order, never repeated. Spare song time is absorbed by stretching shots (photos up to
+    3s, videos up to their own length). If even that cannot fill the song, `cap` reports how long the clips can run so the
+    caller can end the video there. If the song is too short for all clips they are thinned evenly (never reordered)."""
+    D = tl["duration"]
+    cap = sum(_caps(m)[1] for m in items) * 0.98
+    seq = list(items)
+    cuts, work = plan_cuts(tl, pace, seed, len(seq))
+    n = len(cuts) - 1
+    unused: list[str] = []
+    if n < len(seq):
+        keep = sorted({round(i * (len(seq) - 1) / max(n - 1, 1)) for i in range(n)})[:n]
+        dropped = {seq[i]["id"] for i in range(len(seq)) if i not in keep}
+        seq = [seq[i] for i in keep]
+        unused = sorted(dropped - {m["id"] for m in seq})
+    if len(cuts) - 1 > len(seq):
+        cuts = merge_to_fit(cuts, seq, work, pace)
+    shots = assign_seq(cuts, seq, RATIOS[ratio], work, seed)
+    return shots, unused, work, (cap if D > cap + 0.5 else None)
+
+
 def order_items(media: list[dict], order: str, seed: int) -> list[dict]:
     items = [m for m in media if m.get("status") == "ready"]
     if order == "chrono":
-        key = lambda im: (im[1].get("created") or im[1].get("modified") or 0, im[0])
+        key = lambda im: (im[1].get("taken") or im[1].get("created") or im[1].get("modified") or 0, im[1].get("name", ""), im[0])
         return [m for _, m in sorted(enumerate(items), key=key)]
     if order == "shuffle":
         r = random.Random(seed)
@@ -259,14 +376,18 @@ def order_items(media: list[dict], order: str, seed: int) -> list[dict]:
     return items
 
 
-def plan(media: list[dict], songs: list[dict], ratio: str, pace: float, seed: int, order: str) -> dict:
+def plan(media: list[dict], songs: list[dict], ratio: str, pace: float, seed: int, order: str, repeat: bool = False) -> dict:
     tl = build_timeline(songs)
     items = order_items(media, order, seed)
     if not items or not tl["beats"]:
-        return {"timeline": tl, "shots": [], "unused": []}
-    cuts, work = plan_cuts(tl, pace, seed, len(items))
-    shots, unused = assign(cuts, items, RATIOS[ratio], work, seed)
-    return {"timeline": tl, "shots": shots, "unused": unused}
+        return {"timeline": tl, "shots": [], "unused": [], "cap": None}
+    if repeat:  # cut to the pace slider and cycle through the clips as often as needed
+        cuts, work = plan_cuts(tl, pace, seed, len(items))
+        shots, unused = assign(cuts, items, RATIOS[ratio], work, seed)
+    else:
+        shots, unused, work, cap = plan_no_repeat(items, tl, ratio, pace, seed)
+    shots = balance(shots, {m["id"]: m for m in items}, work)
+    return {"timeline": work, "shots": shots, "unused": unused, "cap": cap if not repeat else None}
 
 
 def retime(shots: list[dict]) -> list[dict]:
@@ -275,3 +396,116 @@ def retime(shots: list[dict]) -> list[dict]:
         s["start"] = round(t, 3)
         t += s["dur"]
     return shots
+
+
+# --------------------------------------------------------------------------- resize / balance
+def _nearest(T: list[float], t: float) -> int:
+    lo, hi = 0, len(T) - 1
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if T[mid] < t:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo - 1 if lo > 0 and abs(T[lo - 1] - t) < abs(T[lo] - t) else lo
+
+
+def _avail(m: dict, s: dict) -> float:
+    return m["duration"] / max(s.get("speed", 1.0), 0.25) if m["kind"] == "video" else 1e9
+
+
+def _limits(m: dict, s: dict) -> tuple[float, float]:
+    """(comfortable min, comfortable max) for a shot of this clip."""
+    if m["kind"] == "image":
+        return PHOTO_MIN, PHOTO_MAX
+    return VIDEO_MIN, min(VIDEO_MAX, _avail(m, s))
+
+
+def _fix_window(s: dict, m: dict) -> None:
+    if m["kind"] == "video":
+        need = s["dur"] * s["speed"]
+        s["in"] = round(max(0.0, min(s["in"], m["duration"] - need)), 3)
+
+
+def resize_shot(shots: list[dict], media: dict[str, dict], tl: dict, i: int, direction: int, strict: bool = True) -> list[dict]:
+    """Make shot i one beat longer (+1) or shorter (-1) by moving the cuts between it and the nearest shot that can
+    take / give that beat: videos first (they can run 1-5s), photos only if no video can. The song length and every
+    cut-on-a-beat stay intact. Raises ValueError with a human message when nothing can give."""
+    n, T = len(shots), tl["beats"]
+    if n < 2:
+        raise ValueError("Only one shot")
+    D = tl["duration"]
+    me = shots[i]
+    k = _nearest(T, me["start"])
+    b = (T[k + 1] - T[k]) if k + 1 < len(T) else (T[k] - T[k - 1])
+    lo_i, hi_i = _limits(media[me["media"]], me)
+    if strict:
+        if direction > 0 and me["dur"] + b > hi_i + 0.05:
+            raise ValueError("Photos look best at 2s or less" if media[me["media"]]["kind"] == "image" else "That's as long as this clip goes")
+        if direction < 0 and me["dur"] - b < 0.5 - 0.05:
+            raise ValueError("Already as short as it goes")
+    bounds = tl.get("bounds", [])
+    order = sorted((j for j in range(n) if j != i), key=lambda j: (abs(j - i), j < i))
+
+    def ok(j: int) -> bool:
+        s = shots[j]
+        lo, hi = _limits(media[s["media"]], s)
+        if direction > 0:   # j gives a beat
+            return s["dur"] - b >= lo - 0.02
+        return s["dur"] + b <= hi + 0.02   # j takes a beat
+
+    def crosses_join(j: int) -> bool:
+        a, z = (i + 1, j) if j > i else (j + 1, i)
+        return any(abs(shots[x]["start"] - bt) < 0.02 for x in range(a, z + 1) for bt in bounds)
+
+    pick = None
+    for want_video in (True, False):
+        for j in order:
+            if (media[shots[j]["media"]]["kind"] == "video") == want_video and ok(j) and not crosses_join(j):
+                pick = j
+                break
+        if pick is not None:
+            break
+    if pick is None:
+        raise ValueError("No room — every other shot is at its limit" if direction > 0 else "No other shot can take the time")
+    j = pick
+    shift = direction if j > i else -direction
+    a, z = (i + 1, j) if j > i else (j + 1, i)
+    starts = [x["start"] for x in shots] + [D]
+    for x in range(a, z + 1):
+        idx = _nearest(T, starts[x]) + shift
+        if not 0 <= idx < len(T):
+            raise ValueError("No more beats")
+        starts[x] = T[idx]
+    durs = [round(starts[x + 1] - starts[x], 3) for x in range(n)]
+    if min(durs) < MIN_SHOT:
+        raise ValueError("Too tight there")
+    out = [dict(x) for x in shots]
+    for x in range(n):
+        out[x]["start"], out[x]["dur"] = round(starts[x], 3), durs[x]
+        _fix_window(out[x], media[out[x]["media"]])
+    return out
+
+
+def balance(shots: list[dict], media: dict[str, dict], tl: dict) -> list[dict]:
+    """Nudge shots toward the house rules: photos ~1s (never much over 1.6s), videos at least 1s. Time moves between
+    neighbours a beat at a time, so everything stays on the beat grid."""
+    cur = [dict(x) for x in shots]
+    for _ in range(80):
+        moved = False
+        for i, s in enumerate(cur):
+            kind = media[s["media"]]["kind"]
+            try:
+                if kind == "image" and s["dur"] > 1.6:
+                    cur = resize_shot(cur, media, tl, i, -1)
+                    moved = True
+                elif kind == "video" and s["dur"] < VIDEO_MIN - 0.08 and s["dur"] < _avail(media[s["media"]], s) - 0.1:
+                    cur = resize_shot(cur, media, tl, i, +1, strict=False)
+                    moved = True
+            except ValueError:
+                continue
+            if moved:
+                break
+        if not moved:
+            break
+    return cur

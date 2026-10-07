@@ -1,6 +1,8 @@
 import { api } from './api.js';
 import { h, icon, logo, dur, toast } from './ui.js';
 
+const ago = (t) => { const s = Date.now() / 1000 - t; if (s < 90) return 'just now'; if (s < 3600) return `${Math.round(s / 60)} min ago`; if (s < 86400) return `${Math.round(s / 3600)} h ago`; return `${Math.round(s / 86400)} d ago`; };
+
 export async function home(screen, _id, go) {
   const list = h('div', { class: 'scroll' });
   const put = (...xs) => list.append(...xs.flat(9).filter((x) => x != null && x !== false));
@@ -34,7 +36,7 @@ export async function home(screen, _id, go) {
   put(h('div', { class: 'group' }, projects.map((p) => h('div', { class: 'row proj' },
     h('button', { class: 'proj-main', onclick: () => go(p.shots ? `#/edit/${p.id}` : `#/new/${p.id}`) },
       h('div', { class: 'th', style: p.thumb ? { backgroundImage: `url(${p.thumb})` } : {} }, p.thumb ? null : icon('video')),
-      h('div', { class: 'grow' }, h('div', { class: 'name' }, p.name), h('div', { class: 'meta' }, p.shots ? `${dur(p.duration)} · ${p.ratio} · ${p.shots} cuts` : 'Draft'))),
+      h('div', { class: 'grow' }, h('div', { class: 'name' }, p.name), h('div', { class: 'meta' }, (p.shots ? `${dur(p.duration)} · ${p.ratio} · ${p.shots} cuts` : 'Draft') + ` · ${ago(p.updated)}`))),
     del(p)))),
     projects.some((p) => p.sample) ? null : h('button', { class: 'btn ghost block', style: { width: 'auto', margin: '0 16px' }, onclick: trySample }, 'Add a sample video'));
   // two-tap delete in the row itself: no overlay to mis-hit on touch screens

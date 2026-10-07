@@ -18,7 +18,7 @@ import uuid
 from engine import audio, cutter, media as media_mod, render
 
 ROOT = pathlib.Path(os.environ.get("CADENCE_DATA", pathlib.Path(__file__).resolve().parent.parent / "projects"))
-DEFAULT_SETTINGS = {"pace": 0.5, "style": "pulse", "filter": "none", "order": "chrono", "seed": 1, "volume": 1.0, "length": "30"}
+DEFAULT_SETTINGS = {"pace": 0.5, "style": "pulse", "filter": "none", "order": "chrono", "seed": 1, "volume": 1.0, "length": "30", "repeat": False}
 PRESETS = {"reel": ("9:16", "30"), "story": ("9:16", "15"), "post": ("4:5", "30"), "square": ("1:1", "30"), "landscape": ("16:9", "60")}
 _locks: dict[str, threading.RLock] = {}
 
@@ -103,12 +103,14 @@ def fit_length(media: list[dict]) -> float:
     return min(max(total, 10.0), 180.0)
 
 
-def apply_length(p: dict) -> None:
+def apply_length(p: dict, cap: float | None = None) -> None:
     """Set each song's trim so the soundtrack matches settings.length (15/30/45/60, full, or fit-my-clips)."""
     songs = [s for s in p["songs"] if s.get("analysis")]
     mode = str(p["settings"].get("length", "30"))
     total = sum(s["analysis"]["duration"] for s in songs)
     target = None if mode == "full" else (fit_length(p["media"]) if mode == "fit" else float(mode))
+    if cap is not None:  # the clips can't fill the song even stretched: end early rather than repeat them
+        target = min(target if target is not None else total, cap)
     remaining = target if target is not None else total
     for s in songs:
         a = s["analysis"]
@@ -117,9 +119,21 @@ def apply_length(p: dict) -> None:
             s["trim"] = [0.0, 0.0]
         elif take >= a["duration"] - 1.0:
             s["trim"] = [0.0, a["duration"]]
+        elif s.get("start") is not None:
+            s["trim"] = list(audio.window_at(a, s["start"], take))
         else:
             s["trim"] = list(audio.best_window(a, take))
         remaining -= (s["trim"][1] - s["trim"][0])
+
+
+def song_preview(pid: str, s: dict) -> pathlib.Path:
+    """Light 96k AAC copy of the song for the picker: tiny, and seeking in it is instant."""
+    out = pdir(pid) / "songs" / (pathlib.Path(s["file"]).stem + ".preview.m4a")
+    if not out.exists():
+        import subprocess
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(pdir(pid) / "songs" / s["file"]), "-vn", "-c:a", "aac", "-b:a", "96k",
+                        "-ac", "2", "-ar", "44100", "-movflags", "+faststart", str(out)], check=True, capture_output=True)
+    return out
 
 
 def ingest_song(pid: str, sid: str) -> None:
@@ -127,6 +141,7 @@ def ingest_song(pid: str, sid: str) -> None:
     s = next(x for x in p["songs"] if x["id"] == sid)
     try:
         a = audio.analyze(str(pdir(pid) / "songs" / s["file"]))
+        song_preview(pid, s)
         def done(p):
             t = next(x for x in p["songs"] if x["id"] == sid)
             t["analysis"], t["status"] = a, "ready"
@@ -150,6 +165,7 @@ def ingest_media(pid: str, mid: str) -> None:
     mdir = pdir(pid) / "media" / mid
     try:
         info = media_mod.ingest(str(mdir / m["orig"]), mdir, m["kind"])
+        info["taken"] = media_mod.capture_time(m["name"], info, m.get("modified"))
         update(pid, lambda p: next(x for x in p["media"] if x["id"] == mid).update(info, status="ready"))
     except Exception as e:  # noqa: BLE001
         update(pid, lambda p: next(x for x in p["media"] if x["id"] == mid).update(status="error", error=str(e)[-200:]))
@@ -179,11 +195,13 @@ def ensure_audio(pid: str) -> None:
 
 
 def replan(pid: str, pace: float | None = None, seed: int | None = None, order: str | None = None,
-           ratio: str | None = None, length: str | None = None) -> dict:
+           ratio: str | None = None, length: str | None = None, repeat: bool | None = None) -> dict:
     p = load(pid)
     st = p["settings"]
     if length:
         st["length"] = str(length)
+    if repeat is not None:
+        st["repeat"] = bool(repeat)
     apply_length(p)
     if pace is not None:
         st["pace"] = pace
@@ -194,7 +212,13 @@ def replan(pid: str, pace: float | None = None, seed: int | None = None, order: 
     if ratio:
         p["ratio"] = ratio
     songs = [s for s in p["songs"] if s["status"] == "ready" and s["trim"][1] - s["trim"][0] >= 0.5]
-    result = cutter.plan(p["media"], songs, p["ratio"], st["pace"], st["seed"], st["order"])
+    result = cutter.plan(p["media"], songs, p["ratio"], st["pace"], st["seed"], st["order"], bool(st.get("repeat")))
+    note = None
+    if result.get("cap"):
+        apply_length(p, cap=result["cap"])
+        songs = [s for s in p["songs"] if s["status"] == "ready" and s["trim"][1] - s["trim"][0] >= 0.5]
+        result = cutter.plan(p["media"], songs, p["ratio"], st["pace"], st["seed"], st["order"], False)
+        note = f"Your clips fill {result['timeline']['duration']:.0f}s, so the video ends there instead of repeating them. Add more clips for a longer cut."
     def apply(q):
         q["settings"], q["ratio"] = st, p["ratio"]
         for qs in q["songs"]:
@@ -203,6 +227,40 @@ def replan(pid: str, pace: float | None = None, seed: int | None = None, order: 
                 qs["trim"] = ps["trim"]
         q["shots"], q["timeline"], q["planned"] = result["shots"], result["timeline"], True
         q["unused"] = result["unused"]
+        q["note"] = note
     update(pid, apply)
     ensure_audio(pid)
     return load(pid)
+
+
+def drop_media_shots(p: dict, mid: str) -> None:
+    """Remove a clip's shots, handing each freed slot to the previous shot (or the next if first) so the
+    video keeps its length and its cuts stay on the beat grid."""
+    shots = p["shots"]
+    for i in range(len(shots) - 1, -1, -1):
+        if shots[i]["media"] != mid or len(shots) < 2:
+            continue
+        s = shots.pop(i)
+        host = shots[i - 1] if i > 0 else shots[0]
+        host["dur"] = round(host["dur"] + s["dur"], 3)
+    cutter.retime(shots)
+
+
+def refresh_dates(pid: str) -> dict[str, float | None]:
+    """Recompute every clip's capture time from its original file (for projects made before `taken` existed)."""
+    p = load(pid)
+    found = {}
+    for m in p["media"]:
+        f = pdir(pid) / "media" / m["id"] / m["orig"]
+        info = {}
+        if m["kind"] == "image":
+            info["exif"] = media_mod._exif_wall(str(f))
+        else:
+            v = media_mod.probe_video(str(f))
+            info = {"created": v["created"], "qt": v["qt"]}
+        found[m["id"]] = media_mod.capture_time(m["name"], info, m.get("modified"))
+    def apply(q):
+        for m in q["media"]:
+            m["taken"] = found.get(m["id"])
+    update(pid, apply)
+    return found

@@ -1,5 +1,10 @@
 const j = async (r) => {
-  if (!r.ok) throw new Error((await r.text()).slice(0, 200) || r.statusText);
+  if (!r.ok) {
+    const t = await r.text();
+    let msg = t;
+    try { msg = JSON.parse(t).error || t; } catch (e) { /* plain text */ }
+    throw new Error(msg.slice(0, 200) || r.statusText);
+  }
   return r.json();
 };
 const body = (b) => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b || {}) });
@@ -13,6 +18,8 @@ export const api = {
   delMedia: (id, mid) => fetch(`/api/projects/${id}/media/${mid}`, { method: 'DELETE' }).then(j),
   plan: (id, opts) => fetch(`/api/projects/${id}/plan`, body(opts)).then(j),
   pick: (id, media, dur, avoid) => fetch(`/api/projects/${id}/pick`, body({ media, dur, avoid })).then(j),
+  resize: (id, shots, index, dir) => fetch(`/api/projects/${id}/resize`, body({ shots, index, dir })).then(j),
+  balance: (id, shots) => fetch(`/api/projects/${id}/balance`, body({ shots })).then(j),
   exportVideo: (id, quality) => fetch(`/api/projects/${id}/export`, body({ quality })).then(j),
   job: (jid) => fetch(`/api/jobs/${jid}`).then(j),
 };

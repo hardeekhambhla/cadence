@@ -1,7 +1,9 @@
 """Media ingest: probe, preview proxies, thumbnails, per-second "interest" scores and crop focus."""
+import calendar
 import datetime
 import json
 import pathlib
+import re
 import subprocess
 
 import numpy as np
@@ -25,6 +27,46 @@ def kind_of(name: str, mime: str = "") -> str:
     if mime.startswith("image/") or ext in IMAGE_EXT:
         return "image"
     return "video"
+
+
+_NAME_TS = re.compile(r"(?<!\d)(20\d{2})[-_]?(\d{2})[-_]?(\d{2})(?:[-_ T]?(\d{2})[-_:]?(\d{2})[-_:]?(\d{2}))?\d{0,3}(?!\d)")  # trailing digits: Pixel-style milliseconds
+
+
+def _wall(y, mo, d, h=0, mi=0, sec=0) -> float | None:
+    """Wall-clock time as a sortable number (phones write local time; comparing wall clocks keeps photos and videos in step)."""
+    try:
+        return float(calendar.timegm(datetime.datetime(int(y), int(mo), int(d), int(h), int(mi), int(sec)).timetuple()))
+    except ValueError:
+        return None
+
+
+def capture_time(name: str, info: dict, modified: float | None) -> float | None:
+    """When the shot was taken: filename stamp (IMG/PXL/DJI/camera names), else EXIF / QuickTime / container time,
+    else the file's last-modified time. Never the upload time unless nothing else exists."""
+    m = _NAME_TS.search(pathlib.Path(name).stem)
+    if m:
+        t = _wall(*[g or 0 for g in m.groups()])
+        if t:
+            return t
+    for key in ("exif", "qt"):
+        if info.get(key):
+            return info[key]
+    if info.get("created") and info["created"] > 86400:
+        return float(info["created"])
+    return modified
+
+
+def _exif_wall(path: str) -> float | None:
+    try:
+        ex = Image.open(path).getexif()
+        sub = ex.get_ifd(0x8769)
+        raw = sub.get(36867) or sub.get(36868) or ex.get(306)
+        if raw:
+            d = datetime.datetime.strptime(str(raw).strip()[:19], "%Y:%m:%d %H:%M:%S")
+            return float(calendar.timegm(d.timetuple()))
+    except Exception:
+        pass
+    return None
 
 
 def _run(cmd: list[str]) -> None:
@@ -56,8 +98,16 @@ def probe_video(path: str) -> dict:
             ts = datetime.datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
         except ValueError:
             pass
+    qt = None
+    raw_qt = j["format"].get("tags", {}).get("com.apple.quicktime.creationdate")
+    if raw_qt:
+        try:
+            d = datetime.datetime.fromisoformat(raw_qt)
+            qt = float(calendar.timegm(d.replace(tzinfo=None).timetuple()))
+        except ValueError:
+            pass
     hdr = s.get("color_transfer") in ("arib-std-b67", "smpte2084")
-    return {"w": w, "h": h, "duration": dur, "fps": fps, "created": ts, "hdr": hdr}
+    return {"w": w, "h": h, "duration": dur, "fps": fps, "created": ts, "qt": qt, "hdr": hdr}
 
 
 def _zn(x: np.ndarray) -> np.ndarray:
@@ -120,6 +170,7 @@ def ingest_video(src: str, mdir: pathlib.Path) -> dict:
 
 
 def ingest_image(src: str, mdir: pathlib.Path) -> dict:
+    exif = _exif_wall(src)
     im = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
     w, h = im.size
     full = im.copy()
@@ -132,7 +183,7 @@ def ingest_image(src: str, mdir: pathlib.Path) -> dict:
     th.thumbnail((360, 360))
     th.save(mdir / "thumb.jpg", quality=80)
     gray = np.asarray(im.convert("L").resize((96, 96)))
-    return {"w": w, "h": h, "duration": 0, "fps": 0, "created": None, "scores": [], "focus": list(_edge_focus(gray)),
+    return {"w": w, "h": h, "duration": 0, "fps": 0, "created": None, "exif": exif, "scores": [], "focus": list(_edge_focus(gray)),
             "proxy": "preview.jpg", "norm": "norm.jpg", "thumb": "thumb.jpg"}
 
 
