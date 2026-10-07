@@ -1,5 +1,8 @@
 # Handoff
 
+Keep-alive: `make install` (needs sudo) installs `systemd/cadence.service`; the machine's watchdog (`~/watchdog`) then restarts it if it is
+ever down. `make status` / `make logs` / `make uninstall`.
+
 Run: `make run` (port 8430, also reachable over Tailscale). Tests: `make test` (synthetic media in `tests/assets`,
 generated on first run). Needs ffmpeg + the venv (`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`).
 

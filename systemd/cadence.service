@@ -7,6 +7,7 @@ User=dhruv
 WorkingDirectory=/home/dhruv/hardee/video-editor
 ExecStart=/home/dhruv/hardee/video-editor/.venv/bin/python app.py
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
